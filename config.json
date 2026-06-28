@@ -1,0 +1,19 @@
+{
+  "base": null,
+  "world": null,
+  "interval": null,
+  "duration": 0.0,
+  "timeout": 15.0,
+  "jsonl_output": null,
+  "csv_output": null,
+  "state_file": null,
+  "output_dir": "outputs",
+  "snapshot": false,
+  "infer_player_events": false,
+  "verbose": false,
+  "user_agent": "dynmap-public-collector/1.0",
+  "timezone_offset": 0,
+  "event_recorder": true,
+  "player_recorder": true,
+  "tile_recorder": false
+}
