@@ -12,6 +12,11 @@ class TileError(Exception):
 class TileDownloadError(TileError):
     """Raised when an HTTP request fails, times out, or returns a non-2xx status."""
 
+    def __init__(self, message: str, *, status: int | None = None, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.status = status
+        self.retryable = retryable
+
 
 class TileHashError(TileError):
     """Raised when hash computation fails (e.g. unsupported algorithm or corrupt data)."""

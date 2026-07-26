@@ -117,12 +117,10 @@ dynmap_recorder/synchronizers/tile/
 
 ### Phase 7: Retry / エラーハンドリング強化
 
-`TileProcessResult.failed == True` のタイルを次の tick で再試行する仕組み。
 
 実装済み:
-- `TileSynchronizer` 内部で retry queue を保持
-- `on_tick()` の冒頭で前回失敗分を先頭に追加
-- `attempts >= 3` で打ち切り、warning を出して破棄
+- retry / scanner の重複は `TileID` で除去し、retry 側を優先
+- `TileDownloadError.retryable == True` の失敗だけを再試行対象にする
 
 ### Phase 8: Metrics / Progress 表示
 
@@ -160,6 +158,7 @@ tests/tile/
     test_writer.py         4件  ✅
 
 計: 55 passed, 2 skipped
+計: 57 passed, 2 skipped
 ```
 
 **未カバー領域:**

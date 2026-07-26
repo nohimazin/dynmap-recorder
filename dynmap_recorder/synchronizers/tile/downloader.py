@@ -109,7 +109,9 @@ class TileDownloader:
                     delay *= self.retry_policy.backoff
                     continue
                 raise TileDownloadError(
-                    f"HTTP {exc.code} {exc.reason} for {url}"
+                    f"HTTP {exc.code} {exc.reason} for {url}",
+                    status=exc.code,
+                    retryable=exc.code >= 500,
                 ) from exc
             except urllib.error.URLError as exc:
                 last_exc = exc
@@ -118,7 +120,8 @@ class TileDownloader:
                     delay *= self.retry_policy.backoff
                     continue
                 raise TileDownloadError(
-                    f"Network error for {url}: {exc.reason}"
+                    f"Network error for {url}: {exc.reason}",
+                    retryable=True,
                 ) from exc
             except TimeoutError as exc:
                 last_exc = exc
@@ -126,17 +129,17 @@ class TileDownloader:
                     time.sleep(delay)
                     delay *= self.retry_policy.backoff
                     continue
-                raise TileDownloadError(f"Timeout fetching {url}") from exc
+                raise TileDownloadError(f"Timeout fetching {url}", retryable=True) from exc
             except OSError as exc:
                 last_exc = exc
                 if attempt < attempts:
                     time.sleep(delay)
                     delay *= self.retry_policy.backoff
                     continue
-                raise TileDownloadError(f"OS error for {url}: {exc}") from exc
+                raise TileDownloadError(f"OS error for {url}: {exc}", retryable=True) from exc
 
         assert last_exc is not None
-        raise TileDownloadError(f"Failed to fetch {url}") from last_exc
+        raise TileDownloadError(f"Failed to fetch {url}", retryable=True) from last_exc
 
     def download_many(self, items: Sequence[Tuple]) -> List[DownloadResult]:
         """Download a sequence of ``(tile_id, map_info)`` pairs sequentially.

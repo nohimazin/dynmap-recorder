@@ -15,7 +15,7 @@ from dynmap_recorder.context import TickContext
 
 from .database import TileDatabase
 from .downloader import DownloadResult, TileDownloader
-from .exceptions import TileError
+from .exceptions import TileDownloadError, TileError
 from .hasher import TileHasher
 from .models import TileID, TileProcessResult, TileState, VisibleTile
 from .path_resolver import TilePathResolver
@@ -158,10 +158,16 @@ class TileSynchronizer:
         for result in results:
             if result.failed:
                 tile = tiles_by_id.get(result.tile_id)
-                if tile is not None:
+                if tile is not None and self._should_retry(result.error):
                     self._queue_retry(tile)
             else:
                 self._retry_attempts.pop(result.tile_id, None)
+
+    def _should_retry(self, error: Exception | None) -> bool:
+        """Return True when a tile failure should be retried on a later tick."""
+        if not isinstance(error, TileDownloadError):
+            return False
+        return bool(getattr(error, "retryable", False))
 
     def _queue_retry(self, tile: VisibleTile) -> None:
         """Queue a failed tile unless it has exceeded the retry limit."""
