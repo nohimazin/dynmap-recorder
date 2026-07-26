@@ -41,16 +41,28 @@ class TileDownloader:
     def __init__(self, timeout: int = 10) -> None:
         self.timeout = timeout
 
-    def download(self, tile_id, map_info) -> DownloadResult:
+    def download(
+        self,
+        tile_id: TileID,
+        map_info: MapInfo,
+        *,
+        etag: str | None = None,
+        last_modified: str | None = None,
+    ) -> DownloadResult:
         """Download the tile identified by ``tile_id`` and ``map_info``.
 
         The URL is constructed using the pure ``build_url`` function.  The
         method returns a :class:`DownloadResult` with the response data and the
-        relevant HTTP headers.
+        relevant HTTP headers.  If the server returns 304 Not Modified, it is
+        returned as a successful status=304 result.
         """
         url = build_url(tile_id, map_info)
         try:
             req = urllib.request.Request(url)
+            if etag:
+                req.add_header("If-None-Match", etag)
+            if last_modified:
+                req.add_header("If-Modified-Since", last_modified)
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 data = resp.read()
                 status = resp.status
@@ -65,6 +77,14 @@ class TileDownloader:
                     else None,
                 )
         except urllib.error.HTTPError as exc:
+            if exc.code == 304:
+                return DownloadResult(
+                    status=304,
+                    data=b"",
+                    etag=exc.headers.get("ETag"),
+                    last_modified=exc.headers.get("Last-Modified"),
+                    content_length=0,
+                )
             raise TileDownloadError(
                 f"HTTP {exc.code} {exc.reason} for {url}"
             ) from exc

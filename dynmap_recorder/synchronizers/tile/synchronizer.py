@@ -7,7 +7,9 @@ Scanner → URLBuilder → Downloader → Hasher → Database → PathResolver �
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import List
 
 from dynmap_recorder.context import TickContext
 
@@ -15,7 +17,7 @@ from .database import TileDatabase
 from .downloader import DownloadResult, TileDownloader
 from .exceptions import TileError
 from .hasher import TileHasher
-from .models import TileState, VisibleTile
+from .models import TileProcessResult, TileState, VisibleTile
 from .path_resolver import TilePathResolver
 from .scanner import VisibleTileScanner
 from .writer import TileWriter
@@ -28,6 +30,10 @@ class TileSynchronizer:
 
     Shares the same ``on_tick(ctx)`` interface as the recorder classes.
     Uses Dependency Injection (DI) to access all collaborator components.
+
+    Worker threads handle HTTP download, hashing, and file writing.
+    DB writes (``save`` / ``touch``) are aggregated on the calling thread
+    inside a single ``db.transaction()`` to avoid SQLite concurrency issues.
     """
 
     def __init__(
@@ -39,14 +45,24 @@ class TileSynchronizer:
         hasher: TileHasher,
         resolver: TilePathResolver,
         writer: TileWriter,
+        max_workers: Optional[int] = 4,
     ) -> None:
-        """Initialize the synchronizer with required components."""
+        """Initialize the synchronizer with required components.
+
+        Parameters
+        ----------
+        max_workers:
+            Number of threads in the ``ThreadPoolExecutor`` used to process
+            tiles in parallel.  I/O‑bound work (HTTP, disk) benefits from
+            values between 4 and 16; defaults to ``4``.
+        """
         self.db = db
         self.scanner = scanner
         self.downloader = downloader
         self.hasher = hasher
         self.resolver = resolver
         self.writer = writer
+        self.max_workers = max_workers
 
     # ------------------------------------------------------------------
     # Public interface – mirrors Recorder.on_tick(ctx)
@@ -55,6 +71,10 @@ class TileSynchronizer:
     def on_tick(self, ctx: TickContext) -> None:
         """Run the tile-synchronisation pipeline for a single poll tick.
 
+        Tiles are processed in parallel (HTTP + hash + write) by a
+        ``ThreadPoolExecutor``.  Once all workers complete, DB writes are
+        applied atomically in a single ``transaction()`` on the calling thread.
+
         Parameters
         ----------
         ctx:
@@ -62,41 +82,114 @@ class TileSynchronizer:
             poll. ``ctx.timestamp`` is used as the authoritative timestamp.
         """
         visible_tiles = self.scanner.scan(ctx)
+        if not visible_tiles:
+            return
 
-        for vt in visible_tiles:
-            try:
-                self._process_tile(vt, ctx)
-            except TileError as exc:
-                _log.error("Tile %s failed: %s", vt.tile_id, exc)
-            except Exception as exc:  # noqa: BLE001
-                _log.exception("Unexpected error for tile %s: %s", vt.tile_id, exc)
+        # ---- parallel download / hash / write ----------------------------
+        results: List[TileProcessResult] = []
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = {
+                executor.submit(self._process_tile, vt, ctx): vt
+                for vt in visible_tiles
+            }
+            for future in as_completed(futures):
+                vt = futures[future]
+                try:
+                    results.append(future.result())
+                except Exception as exc:  # noqa: BLE001
+                    _log.exception("Unexpected error for tile %s: %s", vt.tile_id, exc)
+                    results.append(
+                        TileProcessResult(
+                            tile_id=vt.tile_id,
+                            checked_at=ctx.timestamp,
+                            error=exc,
+                        )
+                    )
+
+        # ---- aggregate DB writes in a single transaction -----------------
+        with self.db.transaction():
+            for result in results:
+                if result.failed:
+                    continue
+                if result.state is not None:
+                    self.db.save(result.state)
+                elif result.touch_only:
+                    self.db.touch(result.tile_id, result.checked_at)
 
     # ------------------------------------------------------------------
     # Internal pipeline helper chain
     # ------------------------------------------------------------------
 
-    def _process_tile(self, vt: VisibleTile, ctx: TickContext) -> None:
-        """Process a single visible tile."""
-        result = self._download(vt)
-        new_hash = self.hasher.hash(result.data)
-        old_state = self.db.load(vt.tile_id)
+    def _process_tile(self, vt: VisibleTile, ctx: TickContext) -> TileProcessResult:
+        """Process a single visible tile and return the outcome.
 
-        if self._should_update(old_state, new_hash):
-            path = self.resolver.resolve(vt.tile_id, vt.map_info)
-            self._write_tile(path, result.data)
-            new_state = self._build_state(vt, new_hash, path, result, ctx.timestamp)
-            self._save_state(new_state)
-            _log.debug("Updated tile %s (%d bytes)", vt.tile_id, len(result.data))
-        else:
-            self.db.touch(vt.tile_id, ctx.timestamp)
-            _log.debug("Tile %s unchanged; touched last_checked", vt.tile_id)
+        **No DB writes are performed here.** The caller is responsible for
+        collecting results and committing them via ``db.transaction()``.
 
-    def _download(self, vt: VisibleTile) -> DownloadResult:
-        """Download the tile using the downloader."""
-        return self.downloader.download(vt.tile_id, vt.map_info)
+        Returns
+        -------
+        TileProcessResult
+            Summary of what happened: state to save, touch_only flag, error.
+        """
+        try:
+            old_state = self.db.load(vt.tile_id)
+            result = self._download(vt, old_state)
 
-    def _should_update(self, old_state: TileState | None, new_hash: bytes) -> bool:
-        """Return True if the tile state should be updated based on hash differences."""
+            if result.status == 304:
+                _log.debug("Tile %s unchanged (HTTP 304); will touch last_checked", vt.tile_id)
+                return TileProcessResult(
+                    tile_id=vt.tile_id,
+                    touch_only=True,
+                    checked_at=ctx.timestamp,
+                    attempts=result.attempts,
+                )
+
+            new_hash = self.hasher.hash(result.data)
+
+            if self._should_update(old_state, result, new_hash):
+                path = self.resolver.resolve(vt.tile_id, vt.map_info)
+                self._write_tile(path, result.data)
+                new_state = self._build_state(vt, new_hash, path, result, ctx.timestamp)
+                _log.debug("Updated tile %s (%d bytes)", vt.tile_id, len(result.data))
+                return TileProcessResult(
+                    tile_id=vt.tile_id,
+                    state=new_state,
+                    updated=True,
+                    checked_at=ctx.timestamp,
+                    attempts=result.attempts,
+                )
+            else:
+                _log.debug("Tile %s unchanged (hash match); will touch last_checked", vt.tile_id)
+                return TileProcessResult(
+                    tile_id=vt.tile_id,
+                    touch_only=True,
+                    checked_at=ctx.timestamp,
+                    attempts=result.attempts,
+                )
+
+        except TileError as exc:
+            _log.error("Tile %s failed: %s", vt.tile_id, exc)
+            return TileProcessResult(
+                tile_id=vt.tile_id,
+                checked_at=ctx.timestamp,
+                error=exc,
+            )
+
+    def _download(self, vt: VisibleTile, old_state: TileState | None = None) -> DownloadResult:
+        """Download the tile using the downloader, passing conditional headers if old_state exists."""
+        etag = old_state.etag if old_state else None
+        last_modified = old_state.last_modified if old_state else None
+        return self.downloader.download(
+            vt.tile_id,
+            vt.map_info,
+            etag=etag,
+            last_modified=last_modified,
+        )
+
+    def _should_update(self, old_state: TileState | None, result: DownloadResult, new_hash: bytes) -> bool:
+        """Return True if the tile state should be updated based on status and hash differences."""
+        if result.status == 304:
+            return False
         return old_state is None or old_state.hash != new_hash
 
     def _write_tile(self, path: Path, data: bytes) -> None:
@@ -121,8 +214,5 @@ class TileSynchronizer:
             last_checked=timestamp,
             etag=result.etag,
             size=size,
+            last_modified=result.last_modified,
         )
-
-    def _save_state(self, state: TileState) -> None:
-        """Save the tile state in the database."""
-        self.db.save(state)

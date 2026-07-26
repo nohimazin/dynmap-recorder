@@ -22,8 +22,12 @@ def create_default_synchronizer(settings: TileSynchronizerSettings) -> TileSynch
         Configuration settings containing output root, database path, etc.
     """
     db = TileDatabase(settings.database_path)
-    scanner = VisibleTileScanner()
-    downloader = TileDownloader(timeout=settings.timeout)
+    scanner = VisibleTileScanner(
+        dynmap_config=settings.dynmap_config,
+        scan_radius=settings.scan_radius,
+        base_url=settings.base_url,
+    )
+    downloader = TileDownloader(timeout=settings.timeout, retry_policy=settings.retry_policy)
     hasher = TileHasher(algorithm=settings.hash_algorithm)
     resolver = TilePathResolver(settings.output_root)
     writer = TileWriter()
@@ -35,4 +39,5 @@ def create_default_synchronizer(settings: TileSynchronizerSettings) -> TileSynch
         hasher=hasher,
         resolver=resolver,
         writer=writer,
+        max_workers=settings.max_workers,
     )

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +22,10 @@ class TileDatabase:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn: Optional[sqlite3.Connection] = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
+        # Tracks nesting depth of transaction() calls.
+        # When depth > 0 we are inside a managed transaction; individual
+        # save()/touch() calls must NOT commit so the outer transaction stays open.
+        self._transaction_depth: int = 0
         self._init_schema()
 
     # ---------------------------------------------------------------------
@@ -41,13 +46,44 @@ class TileDatabase:
             last_checked  INTEGER,
             last_changed  INTEGER,
             created_at    INTEGER,
+            last_modified TEXT,
             PRIMARY KEY (map_id, zoom, x, y)
         );
         """
         assert self.conn is not None
         self.conn.execute(create_sql)
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_last_checked ON tiles(last_checked);")
+        try:
+            self.conn.execute("ALTER TABLE tiles ADD COLUMN last_modified TEXT;")
+        except sqlite3.OperationalError:
+            pass
         self.conn.commit()
+
+    # ---------------------------------------------------------------------
+    # Transaction management
+    # ---------------------------------------------------------------------
+    @contextmanager
+    def transaction(self):
+        """Context manager for batching multiple DB writes in a single transaction.
+
+        Supports nesting: only the outermost ``with db.transaction():`` block
+        issues ``COMMIT`` (or ``ROLLBACK`` on exception). Inner blocks are
+        no‑ops with respect to commit/rollback, delegating to the outer scope.
+        """
+        is_outermost = (self._transaction_depth == 0)
+        self._transaction_depth += 1
+        success = False
+        try:
+            yield self
+            success = True
+        finally:
+            self._transaction_depth -= 1
+            if is_outermost:
+                assert self.conn is not None
+                if success:
+                    self.conn.commit()
+                else:
+                    self.conn.rollback()
 
     # ---------------------------------------------------------------------
     # CRUD API
@@ -70,6 +106,7 @@ class TileDatabase:
             last_checked=row["last_checked"],
             etag=row["etag"],
             size=row["size"],
+            last_modified=row["last_modified"],
         )
 
     def save(self, state: TileState) -> None:
@@ -86,8 +123,8 @@ class TileDatabase:
         sql = """
         INSERT INTO tiles (
             map_id, zoom, x, y,
-            hash, size, etag, downloaded_at, last_checked, last_changed, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            hash, size, etag, downloaded_at, last_checked, last_changed, created_at, last_modified
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(map_id, zoom, x, y) DO UPDATE SET
             hash = excluded.hash,
             size = excluded.size,
@@ -95,7 +132,8 @@ class TileDatabase:
             downloaded_at = excluded.downloaded_at,
             last_checked = excluded.last_checked,
             last_changed = excluded.last_changed,
-            created_at = tiles.created_at;
+            created_at = tiles.created_at,
+            last_modified = excluded.last_modified;
         """
         self.conn.execute(
             sql,
@@ -111,9 +149,11 @@ class TileDatabase:
                 state.last_checked,
                 last_changed,
                 now,
+                state.last_modified,
             ),
         )
-        self.conn.commit()
+        if self._transaction_depth == 0:
+            self.conn.commit()
 
     def remove(self, tile_id: TileID) -> None:
         """Delete the record for *tile_id* if it exists."""
@@ -122,7 +162,8 @@ class TileDatabase:
             "DELETE FROM tiles WHERE map_id=? AND zoom=? AND x=? AND y=?",
             (tile_id.map_id, tile_id.zoom, tile_id.x, tile_id.y),
         )
-        self.conn.commit()
+        if self._transaction_depth == 0:
+            self.conn.commit()
 
     def touch(self, tile_id: TileID, checked_at: int) -> None:
         """Update only the ``last_checked`` timestamp for *tile_id*.
@@ -144,7 +185,8 @@ class TileDatabase:
             "UPDATE tiles SET last_checked=? WHERE map_id=? AND zoom=? AND x=? AND y=?",
             (checked_at, tile_id.map_id, tile_id.zoom, tile_id.x, tile_id.y),
         )
-        self.conn.commit()
+        if self._transaction_depth == 0:
+            self.conn.commit()
 
     def close(self) -> None:
         if self.conn:

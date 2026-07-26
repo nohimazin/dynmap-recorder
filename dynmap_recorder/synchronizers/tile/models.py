@@ -95,6 +95,8 @@ class TileState:
     last_checked: Optional[int]
     etag: Optional[str] = None
     size: Optional[int] = None
+    last_modified: Optional[str] = None
+
 
 # ----------------------------------------------------------------------
 # VisibleTile – result of the scanner, carries priority information
@@ -111,10 +113,40 @@ class VisibleTile:
     map_info: MapInfo
     priority: int = 0
 
+@dataclass
+class TileProcessResult:
+    """Result returned by ``TileSynchronizer._process_tile()``.
+
+    Separates the HTTP/hash/write work (done in a worker thread) from the DB
+    write (done in the main thread inside a single ``transaction()``).
+    """
+
+    tile_id: TileID
+    state: Optional[TileState] = None
+    updated: bool = False
+    touch_only: bool = False
+    checked_at: int = 0
+    attempts: int = 1
+    error: Optional[Exception] = field(default=None, compare=False)
+
+    @property
+    def failed(self) -> bool:
+        """Return True if an exception occurred during tile processing."""
+        return self.error is not None
+
+
+from .downloader import RetryPolicy
+from .metrics import MetricsCollector, TickMetricsSummary, TileMetrics
+
 __all__ = [
     "TileID",
     "MapInfo",
     "HashAlgorithm",
     "TileState",
+    "TileProcessResult",
     "VisibleTile",
+    "RetryPolicy",
+    "TileMetrics",
+    "TickMetricsSummary",
+    "MetricsCollector",
 ]

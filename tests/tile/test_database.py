@@ -20,6 +20,7 @@ def state(tile_id):
         last_checked=1_000_000,
         etag='"abc123"',
         size=1024,
+        last_modified="Mon, 01 Jan 2026 00:00:00 GMT",
     )
 
 
@@ -33,6 +34,7 @@ class TestPersistence:
         assert retrieved.hash == state.hash
         assert retrieved.etag == state.etag
         assert retrieved.size == state.size
+        assert retrieved.last_modified == state.last_modified
 
     def test_close_and_reopen(self, tmp_path, tile_id, state):
         """Data persists after closing and reopening the database."""
@@ -95,3 +97,51 @@ class TestTouch:
         db_file = tmp_path / "tile.db"
         with TileDatabase(db_file) as db:
             db.touch(tile_id, checked_at=1)  # should not raise
+
+
+class TestTransaction:
+    def test_nested_transaction_commits_all(self, tmp_path, tile_id, state):
+        db_file = tmp_path / "tile.db"
+        tile_id2 = TileID(map_id=1, zoom=2, x=10, y=21)
+        state2 = TileState(tile=tile_id2, hash=b"\x00"*32, path=None, downloaded_at=1000, last_checked=1000)
+
+        with TileDatabase(db_file) as db:
+            with db.transaction():
+                db.save(state)
+                with db.transaction():
+                    db.save(state2)
+
+        # Verify both states persisted after outer block exits
+        with TileDatabase(db_file) as db2:
+            assert db2.load(tile_id) is not None
+            assert db2.load(tile_id2) is not None
+
+    def test_transaction_rollback_on_exception(self, tmp_path, tile_id, state):
+        db_file = tmp_path / "tile.db"
+        with TileDatabase(db_file) as db:
+            with pytest.raises(RuntimeError):
+                with db.transaction():
+                    db.save(state)
+                    raise RuntimeError("Simulated DB operation error")
+
+        # Verify state was rolled back and not persisted
+        with TileDatabase(db_file) as db2:
+            assert db2.load(tile_id) is None
+
+    def test_nested_transaction_rollback_on_inner_exception(self, tmp_path, tile_id, state):
+        db_file = tmp_path / "tile.db"
+        tile_id2 = TileID(map_id=1, zoom=2, x=10, y=21)
+        state2 = TileState(tile=tile_id2, hash=b"\x00"*32, path=None, downloaded_at=1000, last_checked=1000)
+
+        with TileDatabase(db_file) as db:
+            with pytest.raises(ValueError):
+                with db.transaction():
+                    db.save(state)
+                    with db.transaction():
+                        db.save(state2)
+                        raise ValueError("Inner error")
+
+        # Entire transaction should roll back
+        with TileDatabase(db_file) as db2:
+            assert db2.load(tile_id) is None
+            assert db2.load(tile_id2) is None
