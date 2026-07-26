@@ -85,11 +85,16 @@ class TileSynchronizer:
         if not visible_tiles:
             return
 
+        old_states = {
+            vt.tile_id: self.db.load(vt.tile_id)
+            for vt in visible_tiles
+        }
+
         # ---- parallel download / hash / write ----------------------------
         results: List[TileProcessResult] = []
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {
-                executor.submit(self._process_tile, vt, ctx): vt
+                executor.submit(self._process_tile, vt, ctx, old_states.get(vt.tile_id), False): vt
                 for vt in visible_tiles
             }
             for future in as_completed(futures):
@@ -120,7 +125,13 @@ class TileSynchronizer:
     # Internal pipeline helper chain
     # ------------------------------------------------------------------
 
-    def _process_tile(self, vt: VisibleTile, ctx: TickContext) -> TileProcessResult:
+    def _process_tile(
+        self,
+        vt: VisibleTile,
+        ctx: TickContext,
+        old_state: TileState | None = None,
+        load_old_state: bool = True,
+    ) -> TileProcessResult:
         """Process a single visible tile and return the outcome.
 
         **No DB writes are performed here.** The caller is responsible for
@@ -132,7 +143,8 @@ class TileSynchronizer:
             Summary of what happened: state to save, touch_only flag, error.
         """
         try:
-            old_state = self.db.load(vt.tile_id)
+            if load_old_state and old_state is None:
+                old_state = self.db.load(vt.tile_id)
             result = self._download(vt, old_state)
 
             if result.status == 304:

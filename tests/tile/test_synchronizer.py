@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
+import threading
 
 import pytest
 
@@ -354,6 +355,57 @@ def test_on_tick_partial_failures_in_parallel_batch(dummy_ctx, map_info):
     saved_tile_xs = {call_args[0][0].tile.x for call_args in db.save.call_args_list}
     expected_xs = {i for i in range(20) if i % 5 != 0}
     assert saved_tile_xs == expected_xs
+
+
+def test_on_tick_loads_db_states_on_main_thread(dummy_ctx, tile_id, map_info):
+    db = MagicMock(spec=TileDatabase)
+    load_threads: list[str] = []
+
+    def load_side_effect(tile_id_arg):
+        load_threads.append(threading.current_thread().name)
+        return None
+
+    db.load.side_effect = load_side_effect
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_transaction():
+        yield db
+
+    db.transaction = fake_transaction
+
+    scanner = MagicMock(spec=VisibleTileScanner)
+    scanner.scan.return_value = [
+        VisibleTile(tile_id=tile_id, map_info=map_info, priority=1.0),
+        VisibleTile(tile_id=TileID(map_id=1, zoom=2, x=11, y=20), map_info=map_info, priority=2.0),
+    ]
+
+    downloader = MagicMock(spec=TileDownloader)
+    downloader.download.return_value = DownloadResult(status=200, data=b"data")
+
+    hasher = MagicMock(spec=TileHasher)
+    hasher.hash.return_value = b"hash"
+
+    resolver = MagicMock(spec=TilePathResolver)
+    resolver.resolve.return_value = Path("path")
+
+    writer = MagicMock(spec=TileWriter)
+
+    synchronizer = TileSynchronizer(
+        db=db,
+        scanner=scanner,
+        downloader=downloader,
+        hasher=hasher,
+        resolver=resolver,
+        writer=writer,
+        max_workers=2,
+    )
+
+    synchronizer.on_tick(dummy_ctx)
+
+    assert load_threads
+    assert set(load_threads) == {"MainThread"}
 
 
 def test_factory_creates_correct_instances(tmp_path):

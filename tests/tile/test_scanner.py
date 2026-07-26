@@ -158,3 +158,59 @@ def test_scanner_de_duplication(dummy_ctx, dynmap_config):
     # Unique tile keys
     tile_coords = [(vt.tile_id.x, vt.tile_id.y) for vt in flat_tiles_z0]
     assert len(tile_coords) == len(set(tile_coords))  # No duplicates
+
+
+def test_scanner_projection_cache_isolated_by_world():
+    dynmap_config = {
+        "worlds": [
+            {
+                "name": "world",
+                "maps": [
+                    {
+                        "name": "map",
+                        "prefix": "map",
+                        "tileset": "flat",
+                        "image_format": "png",
+                        "tile_size": 128,
+                        "maxzoom": 0,
+                        "worldtomap": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    }
+                ],
+            },
+            {
+                "name": "nether",
+                "maps": [
+                    {
+                        "name": "map",
+                        "prefix": "map",
+                        "tileset": "flat",
+                        "image_format": "png",
+                        "tile_size": 128,
+                        "maxzoom": 0,
+                        "worldtomap": [0.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+                    }
+                ],
+            },
+        ]
+    }
+
+    scanner = VisibleTileScanner(dynmap_config=dynmap_config, scan_radius=1, base_url="http://localhost")
+
+    metadata = MagicMock(spec=MetadataManager)
+    metadata.worlds_by_id = {1: "world", 2: "nether"}
+
+    ctx = MagicMock(spec=TickContext)
+    ctx.metadata = metadata
+    ctx.player_cache = {
+        1: PlayerState(player_id=1, world_id=1, x=150.0, y=64.0, z=300.0, yaw=0.0, pitch=0.0, hp=20.0, armor=0.0, online=True),
+        2: PlayerState(player_id=2, world_id=2, x=150.0, y=64.0, z=300.0, yaw=0.0, pitch=0.0, hp=20.0, armor=0.0, online=True),
+    }
+
+    ctx.world_id = 1
+    world_tiles = scanner.scan(ctx)
+    ctx.world_id = 2
+    nether_tiles = scanner.scan(ctx)
+
+    assert world_tiles
+    assert nether_tiles
+    assert world_tiles[0].tile_id != nether_tiles[0].tile_id

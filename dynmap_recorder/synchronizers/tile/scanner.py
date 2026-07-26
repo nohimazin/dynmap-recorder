@@ -57,16 +57,17 @@ class VisibleTileScanner:
         self.dynmap_config = dynmap_config or {}
         self.scan_radius = scan_radius
         self.base_url = base_url.rstrip("/")
-        # Cache projection information for faster repeated projections
-        # Mapping: map index -> ProjectionInfo
-        self._projection_cache: Dict[int, ProjectionInfo] = {}
-        # Pre‑populate cache with maps that already exist in the config
+        # Cache projection information for faster repeated projections.
+        # Keyed by (world_name, map_index) so maps from different worlds do not collide.
+        self._projection_cache: Dict[Tuple[str, int], ProjectionInfo] = {}
+        # Pre-populate cache with maps that already exist in the config.
         for world in self.dynmap_config.get("worlds", []):
+            world_name = world.get("name", "")
             for idx, mc in enumerate(world.get("maps", [])):
                 worldtomap = mc.get("worldtomap", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
                 tile_size = mc.get("tile_size", 128)
                 max_zoom = mc.get("maxzoom", 0)
-                self._projection_cache[idx] = ProjectionInfo(
+                self._projection_cache[(world_name, idx)] = ProjectionInfo(
                     worldtomap=tuple(worldtomap),
                     tile_size=tile_size,
                     max_zoom=max_zoom,
@@ -74,14 +75,15 @@ class VisibleTileScanner:
 
     def _project_player(self, map_info, player):
         """Project Minecraft coordinates to Dynmap plane using cached matrix."""
-        wtm = self._projection_cache.get(map_info.id)
+        cache_key = (map_info.world_name, map_info.id)
+        wtm = self._projection_cache.get(cache_key)
         if wtm is None:
             wtm = ProjectionInfo(
                 worldtomap=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
                 tile_size=128,
                 max_zoom=0,
             )
-            self._projection_cache[map_info.id] = wtm
+            self._projection_cache[cache_key] = wtm
         xx = wtm.worldtomap[0] * player.x + wtm.worldtomap[1] * player.y + wtm.worldtomap[2] * player.z
         yy = wtm.worldtomap[3] * player.x + wtm.worldtomap[4] * player.y + wtm.worldtomap[5] * player.z
         return xx, yy
@@ -149,14 +151,15 @@ class VisibleTileScanner:
                 max_zoom = 0
 
             # Use cached world‑to‑map matrix if available, otherwise store it
-            wtm = self._projection_cache.get(map_idx)
+            cache_key = (world_name, map_idx)
+            wtm = self._projection_cache.get(cache_key)
             if wtm is None:
                 wtm = ProjectionInfo(
                     worldtomap=tuple(mc.get("worldtomap", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])),
                     tile_size=mc.get("tile_size", 128),
                     max_zoom=max_zoom,
                 )
-                self._projection_cache[map_idx] = wtm
+                self._projection_cache[cache_key] = wtm
 
             map_info = MapInfo(
                 id=map_idx,
