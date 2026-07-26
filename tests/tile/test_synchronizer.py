@@ -408,6 +408,104 @@ def test_on_tick_loads_db_states_on_main_thread(dummy_ctx, tile_id, map_info):
     assert set(load_threads) == {"MainThread"}
 
 
+def test_failed_tile_is_retried_on_next_tick(dummy_ctx, tile_id, map_info):
+    db = MagicMock(spec=TileDatabase)
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_transaction():
+        yield db
+
+    db.transaction = fake_transaction
+    db.load.return_value = None
+
+    scanner = MagicMock(spec=VisibleTileScanner)
+    scanner.scan.side_effect = [
+        [VisibleTile(tile_id=tile_id, map_info=map_info, priority=1.0)],
+        [],
+    ]
+
+    downloader = MagicMock(spec=TileDownloader)
+    downloader.download.side_effect = [
+        TileDownloadError("temporary failure"),
+        DownloadResult(status=200, data=b"retry_data"),
+    ]
+
+    hasher = MagicMock(spec=TileHasher)
+    hasher.hash.return_value = b"retry_hash"
+
+    resolver = MagicMock(spec=TilePathResolver)
+    resolver.resolve.return_value = Path("retry.png")
+
+    writer = MagicMock(spec=TileWriter)
+
+    synchronizer = TileSynchronizer(
+        db=db,
+        scanner=scanner,
+        downloader=downloader,
+        hasher=hasher,
+        resolver=resolver,
+        writer=writer,
+        max_workers=1,
+    )
+
+    synchronizer.on_tick(dummy_ctx)
+    assert db.save.call_count == 0
+
+    synchronizer.on_tick(dummy_ctx)
+
+    assert downloader.download.call_count == 2
+    assert db.save.call_count == 1
+    assert writer.write.call_count == 1
+    assert db.save.call_args[0][0].tile == tile_id
+
+
+def test_retry_queue_stops_after_max_attempts(dummy_ctx, tile_id, map_info):
+    db = MagicMock(spec=TileDatabase)
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_transaction():
+        yield db
+
+    db.transaction = fake_transaction
+    db.load.return_value = None
+
+    scanner = MagicMock(spec=VisibleTileScanner)
+    scanner.scan.side_effect = [
+        [VisibleTile(tile_id=tile_id, map_info=map_info, priority=1.0)],
+        [],
+        [],
+        [],
+    ]
+
+    downloader = MagicMock(spec=TileDownloader)
+    downloader.download.side_effect = TileDownloadError("persistent failure")
+
+    hasher = MagicMock(spec=TileHasher)
+    resolver = MagicMock(spec=TilePathResolver)
+    writer = MagicMock(spec=TileWriter)
+
+    synchronizer = TileSynchronizer(
+        db=db,
+        scanner=scanner,
+        downloader=downloader,
+        hasher=hasher,
+        resolver=resolver,
+        writer=writer,
+        max_workers=1,
+    )
+
+    synchronizer.on_tick(dummy_ctx)
+    synchronizer.on_tick(dummy_ctx)
+    synchronizer.on_tick(dummy_ctx)
+    synchronizer.on_tick(dummy_ctx)
+
+    assert downloader.download.call_count == 3
+
+
 def test_factory_creates_correct_instances(tmp_path):
     settings = TileSynchronizerSettings(
         output_root=tmp_path / "tiles",

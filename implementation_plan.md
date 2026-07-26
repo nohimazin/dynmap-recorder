@@ -107,10 +107,6 @@ dynmap_recorder/synchronizers/tile/
 
 ## 現在の既知の技術的負債 / 要対応事項
 
-### 🔧 retry / エラーハンドリングの次段階
-
-`RetryPolicy` による HTTP 再試行は downloader 側に実装済みだが、tick 間で失敗タイルを再投入する `RetryQueue` は未実装。
-
 ### 🔧 進捗集計 / メトリクス出力
 
 `TileProcessResult` の集計ログはまだ未実装。`on_tick()` の結果をまとめる `_summarize_results(results)` が次の候補。
@@ -123,19 +119,10 @@ dynmap_recorder/synchronizers/tile/
 
 `TileProcessResult.failed == True` のタイルを次の tick で再試行する仕組み。
 
-現在、HTTP レベルの retry は `TileDownloader` の `RetryPolicy` で対応済み。未対応なのは tick 間の再投入キュー。
-
-```python
-# 設計案
-@dataclass
-class RetryQueue:
-    tiles: List[VisibleTile]
-    attempts: Dict[TileID, int]
-    max_attempts: int = 3
-```
-
+実装済み:
+- `TileSynchronizer` 内部で retry queue を保持
 - `on_tick()` の冒頭で前回失敗分を先頭に追加
-- `attempts[tile_id] >= max_attempts` になったらスキップ＆ログ
+- `attempts >= 3` で打ち切り、warning を出して破棄
 
 ### Phase 8: Metrics / Progress 表示
 
@@ -172,7 +159,7 @@ tests/tile/
     test_url_builder.py    3件  ✅
     test_writer.py         4件  ✅
 
-計: 51 passed, 2 skipped
+計: 55 passed, 2 skipped
 ```
 
 **未カバー領域:**

@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 from dynmap_recorder.context import TickContext
 
@@ -17,7 +17,7 @@ from .database import TileDatabase
 from .downloader import DownloadResult, TileDownloader
 from .exceptions import TileError
 from .hasher import TileHasher
-from .models import TileProcessResult, TileState, VisibleTile
+from .models import TileID, TileProcessResult, TileState, VisibleTile
 from .path_resolver import TilePathResolver
 from .scanner import VisibleTileScanner
 from .writer import TileWriter
@@ -63,6 +63,9 @@ class TileSynchronizer:
         self.resolver = resolver
         self.writer = writer
         self.max_workers = max_workers
+        self._retry_tiles: List[VisibleTile] = []
+        self._retry_attempts: Dict[TileID, int] = {}
+        self._max_retry_attempts = 3
 
     # ------------------------------------------------------------------
     # Public interface – mirrors Recorder.on_tick(ctx)
@@ -82,12 +85,14 @@ class TileSynchronizer:
             poll. ``ctx.timestamp`` is used as the authoritative timestamp.
         """
         visible_tiles = self.scanner.scan(ctx)
-        if not visible_tiles:
+        retry_tiles = self._drain_retry_queue()
+        tiles_to_process = self._merge_tiles(retry_tiles, visible_tiles)
+        if not tiles_to_process:
             return
 
         old_states = {
             vt.tile_id: self.db.load(vt.tile_id)
-            for vt in visible_tiles
+            for vt in tiles_to_process
         }
 
         # ---- parallel download / hash / write ----------------------------
@@ -95,7 +100,7 @@ class TileSynchronizer:
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {
                 executor.submit(self._process_tile, vt, ctx, old_states.get(vt.tile_id), False): vt
-                for vt in visible_tiles
+                for vt in tiles_to_process
             }
             for future in as_completed(futures):
                 vt = futures[future]
@@ -111,6 +116,8 @@ class TileSynchronizer:
                         )
                     )
 
+        self._update_retry_queue(results, {vt.tile_id: vt for vt in tiles_to_process})
+
         # ---- aggregate DB writes in a single transaction -----------------
         with self.db.transaction():
             for result in results:
@@ -120,6 +127,52 @@ class TileSynchronizer:
                     self.db.save(result.state)
                 elif result.touch_only:
                     self.db.touch(result.tile_id, result.checked_at)
+
+    def _drain_retry_queue(self) -> List[VisibleTile]:
+        """Return all queued retry tiles and clear the queue for this tick."""
+        tiles = self._retry_tiles
+        self._retry_tiles = []
+        return tiles
+
+    def _merge_tiles(
+        self,
+        retry_tiles: List[VisibleTile],
+        visible_tiles: List[VisibleTile],
+    ) -> List[VisibleTile]:
+        """Combine retry and freshly scanned tiles while preserving retry priority."""
+        merged: List[VisibleTile] = []
+        seen: set[TileID] = set()
+        for tile in retry_tiles + visible_tiles:
+            if tile.tile_id in seen:
+                continue
+            seen.add(tile.tile_id)
+            merged.append(tile)
+        return merged
+
+    def _update_retry_queue(
+        self,
+        results: List[TileProcessResult],
+        tiles_by_id: Dict[TileID, VisibleTile],
+    ) -> None:
+        """Move failed tiles back into the retry queue for the next tick."""
+        for result in results:
+            if result.failed:
+                tile = tiles_by_id.get(result.tile_id)
+                if tile is not None:
+                    self._queue_retry(tile)
+            else:
+                self._retry_attempts.pop(result.tile_id, None)
+
+    def _queue_retry(self, tile: VisibleTile) -> None:
+        """Queue a failed tile unless it has exceeded the retry limit."""
+        attempts = self._retry_attempts.get(tile.tile_id, 0) + 1
+        if attempts >= self._max_retry_attempts:
+            _log.warning("Skipping tile %s after %d failed tick attempts", tile.tile_id, attempts)
+            self._retry_attempts.pop(tile.tile_id, None)
+            return
+
+        self._retry_attempts[tile.tile_id] = attempts
+        self._retry_tiles.append(tile)
 
     # ------------------------------------------------------------------
     # Internal pipeline helper chain
