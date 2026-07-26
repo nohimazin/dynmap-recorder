@@ -27,6 +27,8 @@ class TickContext:
         Integer ID for the world being recorded.
     player_cache: Mapping[int, PlayerState]
         Mapping of ``player_id`` to immutable ``PlayerState`` objects.
+    player_coords_cache: Mapping[str, Mapping[str, Any]]
+        Backwards-compatible name-keyed cache used by event recorders.
     changed_players: FrozenSet[int]
         Set of player IDs whose state changed this tick.
     joined_players: FrozenSet[int]
@@ -43,6 +45,7 @@ class TickContext:
     metadata: MetadataManager
     world_id: int
     player_cache: Mapping[int, PlayerState]
+    player_coords_cache: Mapping[str, Mapping[str, Any]]
     changed_players: FrozenSet[int]
     joined_players: FrozenSet[int]
     quit_players: FrozenSet[int]

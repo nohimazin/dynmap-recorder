@@ -65,13 +65,29 @@ class VisibleTileScanner:
             world_name = world.get("name", "")
             for idx, mc in enumerate(world.get("maps", [])):
                 worldtomap = mc.get("worldtomap", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
-                tile_size = mc.get("tile_size", 128)
-                max_zoom = mc.get("maxzoom", 0)
+                tile_size = self._tile_size(mc)
+                max_zoom = self._max_zoom(mc)
                 self._projection_cache[(world_name, idx)] = ProjectionInfo(
                     worldtomap=tuple(worldtomap),
                     tile_size=tile_size,
                     max_zoom=max_zoom,
                 )
+
+    @staticmethod
+    def _tile_size(map_config: Dict[str, Any]) -> int:
+        """Resolve Dynmap's ``tilescale`` into the image tile size."""
+        if "tile_size" in map_config:
+            return int(map_config["tile_size"])
+        return 128 * (2 ** max(0, int(map_config.get("tilescale", 0))))
+
+    @staticmethod
+    def _max_zoom(map_config: Dict[str, Any]) -> int:
+        """Resolve both project and native Dynmap zoom configuration keys."""
+        if "maxzoom" in map_config:
+            return max(0, int(map_config["maxzoom"]))
+        # Dynmap's mapzoomout counts the base level, while TileID zoom 0 is
+        # the base level without a leading ``z`` in the filename.
+        return max(0, int(map_config.get("mapzoomout", 1)) - 1)
 
     def _project_player(self, map_info, player):
         """Project Minecraft coordinates to Dynmap plane using cached matrix."""
@@ -144,9 +160,9 @@ class VisibleTileScanner:
             map_name = mc.get("name", "")
             prefix = mc.get("prefix", map_name)
             tileset = mc.get("tileset", prefix)
-            image_format = mc.get("image_format", "png")
-            tile_size = mc.get("tile_size", 128)
-            max_zoom = mc.get("maxzoom", 0)
+            image_format = mc.get("image_format", mc.get("image-format", "png"))
+            tile_size = self._tile_size(mc)
+            max_zoom = self._max_zoom(mc)
             if max_zoom < 0:
                 max_zoom = 0
 
@@ -156,7 +172,7 @@ class VisibleTileScanner:
             if wtm is None:
                 wtm = ProjectionInfo(
                     worldtomap=tuple(mc.get("worldtomap", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])),
-                    tile_size=mc.get("tile_size", 128),
+                    tile_size=self._tile_size(mc),
                     max_zoom=max_zoom,
                 )
                 self._projection_cache[cache_key] = wtm

@@ -50,3 +50,9 @@ def test_path_is_absolute(map_info, tile_id, tmp_path):
     resolver = TilePathResolver(tmp_path)
     p = resolver.resolve(tile_id, map_info)
     assert p.is_absolute()
+
+
+def test_path_uses_map_image_format(map_info, tile_id, tmp_path):
+    map_info = MapInfo(**{**map_info.__dict__, "image_format": "jpg"})
+    resolver = TilePathResolver(tmp_path)
+    assert resolver.resolve(tile_id, map_info).name == "20.jpg"

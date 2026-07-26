@@ -12,6 +12,44 @@ from .models import TileID, TileProcessResult
 _log = logging.getLogger(__name__)
 
 
+@dataclass(slots=True)
+class TickMetrics:
+    """Operational metrics returned for one tile-synchronisation tick."""
+
+    scanned_tiles: int = 0
+    retry_tiles: int = 0
+    downloaded: int = 0
+    updated: int = 0
+    touched: int = 0
+    failed: int = 0
+    retried: int = 0
+    dropped: int = 0
+    elapsed_ms: float = 0.0
+
+    @classmethod
+    def from_results(
+        cls,
+        *,
+        scanned_tiles: int,
+        retry_tiles: int,
+        results: Sequence[TileProcessResult],
+        retried: int,
+        dropped: int,
+        elapsed_ms: float,
+    ) -> "TickMetrics":
+        return cls(
+            scanned_tiles=scanned_tiles,
+            retry_tiles=retry_tiles,
+            downloaded=sum(1 for result in results if result.downloaded),
+            updated=sum(1 for result in results if result.updated),
+            touched=sum(1 for result in results if result.touch_only),
+            failed=sum(1 for result in results if result.failed),
+            retried=retried,
+            dropped=dropped,
+            elapsed_ms=elapsed_ms,
+        )
+
+
 @dataclass(frozen=True)
 class TileMetrics:
     """Metrics for processing a single tile during a tick.

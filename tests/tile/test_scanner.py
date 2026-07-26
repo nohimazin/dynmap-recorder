@@ -214,3 +214,35 @@ def test_scanner_projection_cache_isolated_by_world():
     assert world_tiles
     assert nether_tiles
     assert world_tiles[0].tile_id != nether_tiles[0].tile_id
+
+
+def test_scanner_reads_native_dynmap_map_keys():
+    config = {
+        "worlds": [{
+            "name": "world",
+            "maps": [{
+                "name": "flat",
+                "prefix": "flat",
+                "image-format": "jpg",
+                "tilescale": 1,
+                "mapzoomout": 5,
+                "worldtomap": [1.0, 0.0, 0.0, 0.0, 0.0, -1.0],
+            }],
+        }],
+    }
+    metadata = MagicMock(spec=MetadataManager)
+    metadata.worlds_by_id = {1: "world"}
+    ctx = MagicMock(spec=TickContext)
+    ctx.metadata = metadata
+    ctx.world_id = 1
+    ctx.player_cache = {
+        1: PlayerState(player_id=1, world_id=1, x=0.0, y=64.0, z=0.0,
+                       yaw=0.0, pitch=0.0, hp=20.0, armor=0.0, online=True),
+    }
+
+    tiles = VisibleTileScanner(config, scan_radius=1, base_url="https://example.test").scan(ctx)
+
+    assert tiles
+    assert {tile.map_info.image_format for tile in tiles} == {"jpg"}
+    assert {tile.map_info.tile_size for tile in tiles} == {256}
+    assert max(tile.tile_id.zoom for tile in tiles) == 4

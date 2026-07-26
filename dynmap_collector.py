@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,10 @@ def load_config(config_path: Path) -> dict[str, Any]:
             "timezone_offset": 0,
             "event_recorder": True,
             "player_recorder": True,
+            "tile_recorder": False,
+            "tile_scan_radius": 2,
+            "tile_max_workers": 4,
+            "tile_hash_algorithm": "blake3",
         }
         try:
             config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -89,6 +94,11 @@ def parse_args() -> argparse.Namespace:
     
     parser.add_argument("--player-recorder", action="store_true", default=None, help="Enable Player Recorder")
     parser.add_argument("--no-player-recorder", action="store_false", dest="player_recorder", help="Disable Player Recorder")
+    parser.add_argument("--tile-recorder", action="store_true", default=None, help="Enable tile recorder")
+    parser.add_argument("--no-tile-recorder", action="store_false", dest="tile_recorder", help="Disable tile recorder")
+    parser.add_argument("--tile-scan-radius", type=int, default=None, help="Tile scan radius around players")
+    parser.add_argument("--tile-max-workers", type=int, default=None, help="Tile download worker count")
+    parser.add_argument("--tile-hash-algorithm", choices=("blake3", "sha256"), default=None, help="Tile hash algorithm")
 
     args = parser.parse_args()
 
@@ -116,6 +126,10 @@ def parse_args() -> argparse.Namespace:
         "timezone_offset": 0,
         "event_recorder": True,
         "player_recorder": True,
+        "tile_recorder": False,
+        "tile_scan_radius": 2,
+        "tile_max_workers": 4,
+        "tile_hash_algorithm": "blake3",
     }
 
     resolved = argparse.Namespace()
@@ -146,6 +160,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     resolved_args = parse_args()
+
+    if resolved_args.verbose:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     # Create metadata manager in outputs/metadata/
     output_dir = Path(resolved_args.output_dir)

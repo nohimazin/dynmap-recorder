@@ -266,7 +266,7 @@ class EventRecorder(BaseRecorder):
         """
         payload = ctx.payload
         timestamp = ctx.timestamp
-        player_coords_cache = ctx.player_cache
+        player_coords_cache = getattr(ctx, "player_coords_cache", ctx.player_cache)
         current_players = set()
         for player_entry in payload.get("players", []):
             name = player_entry.get("account") or player_entry.get("name")

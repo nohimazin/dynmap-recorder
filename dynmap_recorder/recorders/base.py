@@ -18,8 +18,8 @@ class BaseRecorder:
 
         ``ctx`` provides ``timestamp``, ``payload``, ``player_cache``,
         ``world_id``, ``interval`` and ``metadata_manager``.
-        """,
-          pass
+        """
+        pass
 
     def on_stop(self) -> None:
         """Called when the poller is shutting down."""

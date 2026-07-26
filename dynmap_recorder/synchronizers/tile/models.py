@@ -127,6 +127,7 @@ class TileProcessResult:
     touch_only: bool = False
     checked_at: int = 0
     attempts: int = 1
+    downloaded: bool = False
     error: Optional[Exception] = field(default=None, compare=False)
 
     @property

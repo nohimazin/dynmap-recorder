@@ -1,6 +1,6 @@
 # dynmap-recorder — 実装方針ドキュメント
 
-> 最終更新: 2026-07-20
+> 最終更新: 2026-07-26
 
 ---
 
@@ -46,7 +46,7 @@ TileSynchronizer.on_tick()
 dynmap_recorder/synchronizers/tile/
     __init__.py        公開シンボル
     models.py          TileID / MapInfo / TileState / TileProcessResult / VisibleTile
-    scanner.py         VisibleTileScanner (ProjectionInfo, better_round)
+    scanner.py         VisibleTileScanner (Dynmap設定キー、ProjectionInfo, better_round)
     downloader.py      TileDownloader (Conditional GET, 304 対応)
     hasher.py          TileHasher (BLAKE3 / SHA-256)
     database.py        TileDatabase (SQLite, transaction())
@@ -55,7 +55,7 @@ dynmap_recorder/synchronizers/tile/
     writer.py          TileWriter
     settings.py        TileSynchronizerSettings
     factory.py         create_default_synchronizer()
-    url_builder.py     TileURLBuilder
+    url_builder.py     TileURLBuilder (Dynmap標準URL形式)
     exceptions.py      TileError / TileDownloadError など
 ```
 
@@ -107,24 +107,46 @@ dynmap_recorder/synchronizers/tile/
 
 ## 現在の既知の技術的負債 / 要対応事項
 
-### 🔧 進捗集計 / メトリクス出力
+### 🔧 残りの技術的負債
 
-`TileProcessResult` の集計ログはまだ未実装。`on_tick()` の結果をまとめる `_summarize_results(results)` が次の候補。
+実サーバーでのタイル取得は確認済み。残りはHTTP異常系を含むポーラー全体のE2E試験と、より広い座標境界の検証。
 
 ---
 
 ## 次フェーズの候補
 
-### Phase 7: Retry / エラーハンドリング強化
+### ✅ Phase 7: Retry / エラーハンドリング強化
 
 
 実装済み:
 - retry / scanner の重複は `TileID` で除去し、retry 側を優先
 - `TileDownloadError.retryable == True` の失敗だけを再試行対象にする
 
+追加実装:
+- `DynmapPoller` から `TileSynchronizer` をサーバー設定取得後に遅延初期化
+- CLI / `config.json` から `tile_recorder`、スキャン半径、ワーカー数、ハッシュ方式を設定可能化
+- ポーリング処理を `TickContext` / `on_tick()` に統一し、タイル同期へプレイヤー状態を供給
+- ポーラー終了時にタイルDB接続をクローズ
+- ポーラー統合テストを追加
+
 ### Phase 8: Metrics / Progress 表示
 
-`TileProcessResult` のフィールドを集計してログ出力。
+✅ `TileProcessResult` のフィールドを集計してログ出力。
+
+- `TickMetrics` を `TileSynchronizer.on_tick()` の戻り値として追加
+- scanned / retry / downloaded / updated / touched / failed / retried / dropped / elapsed_ms を集計
+- `--verbose` 時にINFOログを表示
+- Retry Queue の上限を1000件に設定し、超過分を `dropped` として記録
+- 実SQLite・実ファイルを使う同期パイプラインテストを追加
+
+### ✅ Phase 8-B: 実Dynmapサーバー対応・検証
+
+- Dynmap標準URL形式（`tiles/<world>/<prefix>/<chunk>/<zoom>_<x>_<y>.<format>`）に対応
+- `image-format` / `tilescale` / `mapzoomout` のネイティブ設定キーに対応
+- タイル保存先の拡張子をマップの画像形式に合わせて決定
+- 実サーバー `kuromaru-web-proxy.fly.dev` でプレイヤー座標を取得
+- 実サーバーから140枚のタイルを取得し、全件更新・保存を確認
+- SQLiteに140件のタイル状態を保存
 
 ```
 Tick #42: 128 tiles scanned
@@ -133,8 +155,6 @@ Tick #42: 128 tiles scanned
   failed:      7  (retry pending)
   elapsed:   1.23s
 ```
-
-`TileSynchronizer` に `_summarize_results(results)` メソッドを追加するだけで実装可能。
 
 ### Phase 9: Rate Limit / バックプレッシャー
 
@@ -146,24 +166,23 @@ Tick #42: 128 tiles scanned
 ## テスト状況
 
 ```
-tests/tile/
-    test_database.py       7件  ✅ (transaction ネスト未テスト → Phase 6 残タスク)
-    test_downloader.py     9件  ✅
-    test_hasher.py         6件  ✅ (2 skipped: blake3 native)
-    test_imports.py        1件  ✅
-    test_path_resolver.py  3件  ✅
-    test_scanner.py        4件  ✅
-    test_synchronizer.py   6件  ✅
-    test_url_builder.py    3件  ✅
-    test_writer.py         4件  ✅
-
-計: 55 passed, 2 skipped
-計: 57 passed, 2 skipped
+全テスト: 66 passed, 2 skipped
 ```
 
 **未カバー領域:**
-- `on_tick()` の `transaction()` 統合 (end-to-end)
 - `scanner.py` の projection 行列を使った座標変換の精度検証
+- ポーラー全体のHTTP異常系E2E（304 / Timeout / 404 / Retry→Success）
+- Poller経由でのタイルDownloader異常系（304 / 404 / Retry→Success）
+
+実サーバー検証で確認済み:
+- Dynmap APIからプレイヤー座標を取得
+- 実Dynmap URL形式で140枚のタイルを取得・保存
+- 実SQLiteに140行を保存
+- `image-format`、`tilescale`、`mapzoomout`を含むDynmap設定を読み込み
+
+残りの検証候補:
+- ポーラー全体のHTTP異常系E2E（304 / Timeout / 404 / Retry→Success）
+- Flat / Surfaceの境界座標・遠方座標での位置一致確認
 
 ---
 

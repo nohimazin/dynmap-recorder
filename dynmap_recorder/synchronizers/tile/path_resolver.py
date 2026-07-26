@@ -34,6 +34,6 @@ class TilePathResolver:
             / map_info.tileset
             / f"z{tile.zoom}"
             / str(tile.x)
-            / f"{tile.y}.png"
+            / f"{tile.y}.{map_info.image_format}"
         )
         return path.resolve()

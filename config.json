@@ -15,5 +15,8 @@
   "timezone_offset": 0,
   "event_recorder": true,
   "player_recorder": true,
-  "tile_recorder": false
+  "tile_recorder": false,
+  "tile_scan_radius": 2,
+  "tile_max_workers": 4,
+  "tile_hash_algorithm": "blake3"
 }

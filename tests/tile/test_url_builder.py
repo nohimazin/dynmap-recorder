@@ -28,7 +28,7 @@ def tile_id():
 
 def test_url_basic_format(map_info, tile_id):
     url = build_url(tile_id, map_info)
-    assert url == "http://example.com/dynmap/tiles/flat/2/10_20.png"
+    assert url == "http://example.com/dynmap/tiles/world/tiles/0_0/zz_10_20.png"
 
 
 def test_url_trailing_slash_stripped():
@@ -53,5 +53,11 @@ def test_url_trailing_slash_stripped():
 def test_url_different_zoom_xy(map_info):
     tile = TileID(map_id=1, zoom=3, x=-1, y=5)
     url = build_url(tile, map_info)
-    assert "/3/" in url
+    assert "/world/tiles/-1_0/zzz_-1_5.png" in url
     assert "-1_5.png" in url
+
+
+def test_url_matches_dynmap_world_tile_layout(map_info):
+    tile = TileID(map_id=1, zoom=1, x=-42, y=-22)
+    url = build_url(tile, map_info)
+    assert url == "http://example.com/dynmap/tiles/world/tiles/-2_-1/z_-42_-22.png"
