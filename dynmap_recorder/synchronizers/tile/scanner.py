@@ -76,11 +76,14 @@ class VisibleTileScanner:
         """Project Minecraft coordinates to Dynmap plane using cached matrix."""
         wtm = self._projection_cache.get(map_info.id)
         if wtm is None:
-            wtm = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-        else:
-            wtm = wtm.worldtomap
-        xx = wtm[0] * player.x + wtm[1] * player.y + wtm[2] * player.z
-        yy = wtm[3] * player.x + wtm[4] * player.y + wtm[5] * player.z
+            wtm = ProjectionInfo(
+                worldtomap=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+                tile_size=128,
+                max_zoom=0,
+            )
+            self._projection_cache[map_info.id] = wtm
+        xx = wtm.worldtomap[0] * player.x + wtm.worldtomap[1] * player.y + wtm.worldtomap[2] * player.z
+        yy = wtm.worldtomap[3] * player.x + wtm.worldtomap[4] * player.y + wtm.worldtomap[5] * player.z
         return xx, yy
 
     def _center_tile(self, xx: float, yy: float, map_info, zs: int):
@@ -148,7 +151,11 @@ class VisibleTileScanner:
             # Use cached world‑to‑map matrix if available, otherwise store it
             wtm = self._projection_cache.get(map_idx)
             if wtm is None:
-                wtm = mc.get("worldtomap", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+                wtm = ProjectionInfo(
+                    worldtomap=tuple(mc.get("worldtomap", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])),
+                    tile_size=mc.get("tile_size", 128),
+                    max_zoom=max_zoom,
+                )
                 self._projection_cache[map_idx] = wtm
 
             map_info = MapInfo(

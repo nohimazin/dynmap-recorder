@@ -3,7 +3,7 @@
 Consolidated data structures for the tile synchronizer.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional

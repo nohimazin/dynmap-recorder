@@ -13,8 +13,17 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Optional, Sequence, List, Tuple
 
+import time
+
 from .exceptions import TileDownloadError
 from .url_builder import build_url  # pure function
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    retries: int = 0
+    initial_delay: float = 0.0
+    backoff: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -29,6 +38,7 @@ class DownloadResult:
     etag: Optional[str] = None
     last_modified: Optional[str] = None
     content_length: Optional[int] = None
+    attempts: int = 1
 
 
 class TileDownloader:
@@ -38,8 +48,9 @@ class TileDownloader:
     HTTP request.  The only configurable attribute is the request timeout.
     """
 
-    def __init__(self, timeout: int = 10) -> None:
+    def __init__(self, timeout: int = 10, retry_policy: RetryPolicy | None = None) -> None:
         self.timeout = timeout
+        self.retry_policy = retry_policy or RetryPolicy()
 
     def download(
         self,
@@ -57,45 +68,75 @@ class TileDownloader:
         returned as a successful status=304 result.
         """
         url = build_url(tile_id, map_info)
-        try:
-            req = urllib.request.Request(url)
-            if etag:
-                req.add_header("If-None-Match", etag)
-            if last_modified:
-                req.add_header("If-Modified-Since", last_modified)
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                data = resp.read()
-                status = resp.status
-                hdr = resp.headers
-                return DownloadResult(
-                    status=status,
-                    data=data,
-                    etag=hdr.get("ETag"),
-                    last_modified=hdr.get("Last-Modified"),
-                    content_length=int(hdr.get("Content-Length"))
-                    if hdr.get("Content-Length") is not None
-                    else None,
-                )
-        except urllib.error.HTTPError as exc:
-            if exc.code == 304:
-                return DownloadResult(
-                    status=304,
-                    data=b"",
-                    etag=exc.headers.get("ETag"),
-                    last_modified=exc.headers.get("Last-Modified"),
-                    content_length=0,
-                )
-            raise TileDownloadError(
-                f"HTTP {exc.code} {exc.reason} for {url}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise TileDownloadError(
-                f"Network error for {url}: {exc.reason}"
-            ) from exc
-        except TimeoutError as exc:
-            raise TileDownloadError(f"Timeout fetching {url}") from exc
-        except OSError as exc:
-            raise TileDownloadError(f"OS error for {url}: {exc}") from exc
+        delay = self.retry_policy.initial_delay
+        attempts = self.retry_policy.retries + 1
+        last_exc: Exception | None = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                req = urllib.request.Request(url)
+                if etag:
+                    req.add_header("If-None-Match", etag)
+                if last_modified:
+                    req.add_header("If-Modified-Since", last_modified)
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    data = resp.read()
+                    status = resp.status
+                    hdr = resp.headers
+                    return DownloadResult(
+                        status=status,
+                        data=data,
+                        etag=hdr.get("ETag"),
+                        last_modified=hdr.get("Last-Modified"),
+                        content_length=int(hdr.get("Content-Length"))
+                        if hdr.get("Content-Length") is not None
+                        else None,
+                        attempts=attempt,
+                    )
+            except urllib.error.HTTPError as exc:
+                if exc.code == 304:
+                    return DownloadResult(
+                        status=304,
+                        data=b"",
+                        etag=exc.headers.get("ETag"),
+                        last_modified=exc.headers.get("Last-Modified"),
+                        content_length=0,
+                        attempts=attempt,
+                    )
+                if exc.code >= 500 and attempt < attempts:
+                    last_exc = exc
+                    time.sleep(delay)
+                    delay *= self.retry_policy.backoff
+                    continue
+                raise TileDownloadError(
+                    f"HTTP {exc.code} {exc.reason} for {url}"
+                ) from exc
+            except urllib.error.URLError as exc:
+                last_exc = exc
+                if attempt < attempts:
+                    time.sleep(delay)
+                    delay *= self.retry_policy.backoff
+                    continue
+                raise TileDownloadError(
+                    f"Network error for {url}: {exc.reason}"
+                ) from exc
+            except TimeoutError as exc:
+                last_exc = exc
+                if attempt < attempts:
+                    time.sleep(delay)
+                    delay *= self.retry_policy.backoff
+                    continue
+                raise TileDownloadError(f"Timeout fetching {url}") from exc
+            except OSError as exc:
+                last_exc = exc
+                if attempt < attempts:
+                    time.sleep(delay)
+                    delay *= self.retry_policy.backoff
+                    continue
+                raise TileDownloadError(f"OS error for {url}: {exc}") from exc
+
+        assert last_exc is not None
+        raise TileDownloadError(f"Failed to fetch {url}") from last_exc
 
     def download_many(self, items: Sequence[Tuple]) -> List[DownloadResult]:
         """Download a sequence of ``(tile_id, map_info)`` pairs sequentially.

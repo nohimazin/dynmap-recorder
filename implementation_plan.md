@@ -107,20 +107,13 @@ dynmap_recorder/synchronizers/tile/
 
 ## 現在の既知の技術的負債 / 要対応事項
 
-### 🔧 scanner.py — dead code
+### 🔧 retry / エラーハンドリングの次段階
 
-`better_round` 関数に unreachable な旧実装が残っている (L31–32)。
+`RetryPolicy` による HTTP 再試行は downloader 側に実装済みだが、tick 間で失敗タイルを再投入する `RetryQueue` は未実装。
 
-```python
-# 現状 (L24–32)
-def better_round(num: float, base: int, tile_size: int = 128) -> int:
-    scaled = float(num) / tile_size
-    return int(base * math.ceil(scaled))
-    """Round a number up to the nearest multiple of base."""  # ← dead code
-    return int(base * math.ceil(float(num) / base))          # ← dead code
-```
+### 🔧 進捗集計 / メトリクス出力
 
-→ L31–32 を削除するだけでよい。
+`TileProcessResult` の集計ログはまだ未実装。`on_tick()` の結果をまとめる `_summarize_results(results)` が次の候補。
 
 ---
 
@@ -129,6 +122,8 @@ def better_round(num: float, base: int, tile_size: int = 128) -> int:
 ### Phase 7: Retry / エラーハンドリング強化
 
 `TileProcessResult.failed == True` のタイルを次の tick で再試行する仕組み。
+
+現在、HTTP レベルの retry は `TileDownloader` の `RetryPolicy` で対応済み。未対応なのは tick 間の再投入キュー。
 
 ```python
 # 設計案
@@ -177,11 +172,10 @@ tests/tile/
     test_url_builder.py    3件  ✅
     test_writer.py         4件  ✅
 
-計: 44 passed, 2 skipped
+計: 51 passed, 2 skipped
 ```
 
 **未カバー領域:**
-- `db.transaction()` のネスト動作・rollback シナリオ
 - `on_tick()` の `transaction()` 統合 (end-to-end)
 - `scanner.py` の projection 行列を使った座標変換の精度検証
 
