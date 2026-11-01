@@ -10,16 +10,16 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from dynmap_recorder.context import TickContext
 
 from .database import TileDatabase
 from .downloader import DownloadResult, TileDownloader
-from .exceptions import TileDownloadError, TileError
+from .exceptions import TileError
 from .hasher import TileHasher
+from .metrics import MetricsAggregator, TickMetrics, TileMetrics
 from .models import TileID, TileProcessResult, TileState, VisibleTile
-from .metrics import TickMetrics
 from .path_resolver import TilePathResolver
 from .scanner import VisibleTileScanner
 from .writer import TileWriter
@@ -55,7 +55,7 @@ class TileSynchronizer:
         ----------
         max_workers:
             Number of threads in the ``ThreadPoolExecutor`` used to process
-            tiles in parallel.  I/O‑bound work (HTTP, disk) benefits from
+            tiles in parallel. I/O‑bound work (HTTP, disk) benefits from
             values between 4 and 16; defaults to ``4``.
         """
         self.db = db
@@ -85,7 +85,7 @@ class TileSynchronizer:
         """Run the tile-synchronisation pipeline for a single poll tick.
 
         Tiles are processed in parallel (HTTP + hash + write) by a
-        ``ThreadPoolExecutor``.  Once all workers complete, DB writes are
+        ``ThreadPoolExecutor``. Once all workers complete, DB writes are
         applied atomically in a single ``transaction()`` on the calling thread.
 
         Parameters
@@ -94,17 +94,21 @@ class TileSynchronizer:
             The :class:`~dynmap_recorder.context.TickContext` for the current
             poll. ``ctx.timestamp`` is used as the authoritative timestamp.
         """
-        started = time.perf_counter()
+        tick_start = time.perf_counter()
         visible_tiles = self.scanner.scan(ctx)
         retry_tiles = self._drain_retry_queue()
         tiles_to_process = self._merge_tiles(retry_tiles, visible_tiles)
+        tiles_by_id = {vt.tile_id: vt for vt in tiles_to_process}
+
+        aggregator = MetricsAggregator()
+
         if not tiles_to_process:
-            metrics = TickMetrics(
+            metrics = aggregator.summary(
                 scanned_tiles=len(visible_tiles),
                 retry_tiles=len(retry_tiles),
-                elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                elapsed_ms=(time.perf_counter() - tick_start) * 1000.0,
             )
-            _log.info(self._format_metrics(metrics))
+            _log.info(MetricsAggregator.format_log(metrics))
             return metrics
 
         old_states = {
@@ -122,7 +126,9 @@ class TileSynchronizer:
             for future in as_completed(futures):
                 vt = futures[future]
                 try:
-                    results.append(future.result())
+                    p_res, m_res = future.result()
+                    results.append(p_res)
+                    aggregator.record(m_res)
                 except Exception as exc:  # noqa: BLE001
                     _log.exception("Unexpected error for tile %s: %s", vt.tile_id, exc)
                     results.append(
@@ -132,8 +138,12 @@ class TileSynchronizer:
                             error=exc,
                         )
                     )
-
-        retried, dropped = self._update_retry_queue(results, {vt.tile_id: vt for vt in tiles_to_process})
+                    aggregator.record(
+                        TileMetrics(
+                            tile_id=vt.tile_id,
+                            failed=True,
+                        )
+                    )
 
         # ---- aggregate DB writes in a single transaction -----------------
         with self.db.transaction():
@@ -145,34 +155,24 @@ class TileSynchronizer:
                 elif result.touch_only:
                     self.db.touch(result.tile_id, result.checked_at)
 
-        metrics = TickMetrics.from_results(
+        # ---- update retry queue -----------------------------------------
+        retried, dropped = self._update_retry_queue(results, tiles_by_id)
+
+        # ---- finalize metrics & logging ---------------------------------
+        elapsed_ms = (time.perf_counter() - tick_start) * 1000.0
+        metrics = aggregator.summary(
             scanned_tiles=len(visible_tiles),
             retry_tiles=len(retry_tiles),
-            results=results,
             retried=retried,
             dropped=dropped,
-            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            elapsed_ms=elapsed_ms,
         )
-        _log.info(self._format_metrics(metrics))
+        _log.info(MetricsAggregator.format_log(metrics))
         return metrics
 
-    @staticmethod
-    def _format_metrics(metrics: TickMetrics) -> str:
-        return (
-            "tiles=%d retry=%d downloaded=%d updated=%d touched=%d "
-            "failed=%d retried=%d dropped=%d (%.1fms)"
-            % (
-                metrics.scanned_tiles,
-                metrics.retry_tiles,
-                metrics.downloaded,
-                metrics.updated,
-                metrics.touched,
-                metrics.failed,
-                metrics.retried,
-                metrics.dropped,
-                metrics.elapsed_ms,
-            )
-        )
+    # ------------------------------------------------------------------
+    # Retry queue management
+    # ------------------------------------------------------------------
 
     def _drain_retry_queue(self) -> List[VisibleTile]:
         """Return all queued retry tiles and clear the queue for this tick."""
@@ -199,7 +199,7 @@ class TileSynchronizer:
         self,
         results: List[TileProcessResult],
         tiles_by_id: Dict[TileID, VisibleTile],
-    ) -> tuple[int, int]:
+    ) -> Tuple[int, int]:
         """Move failed tiles back into the retry queue for the next tick."""
         retried = 0
         dropped = 0
@@ -217,7 +217,7 @@ class TileSynchronizer:
 
     def _should_retry(self, error: Exception | None) -> bool:
         """Return True when a tile failure should be retried on a later tick."""
-        if not isinstance(error, TileDownloadError):
+        if not isinstance(error, TileError):
             return False
         return bool(getattr(error, "retryable", False))
 
@@ -248,64 +248,113 @@ class TileSynchronizer:
         ctx: TickContext,
         old_state: TileState | None = None,
         load_old_state: bool = True,
-    ) -> TileProcessResult:
-        """Process a single visible tile and return the outcome.
+    ) -> Tuple[TileProcessResult, TileMetrics]:
+        """Process a single visible tile and return the outcome and metrics.
 
         **No DB writes are performed here.** The caller is responsible for
         collecting results and committing them via ``db.transaction()``.
 
         Returns
         -------
-        TileProcessResult
-            Summary of what happened: state to save, touch_only flag, error.
+        Tuple[TileProcessResult, TileMetrics]
+            Summary of what happened for DB update and detailed metrics.
         """
+        start_time = time.perf_counter()
         try:
             if load_old_state and old_state is None:
                 old_state = self.db.load(vt.tile_id)
             result = self._download(vt, old_state)
+            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
             if result.status == 304:
                 _log.debug("Tile %s unchanged (HTTP 304); will touch last_checked", vt.tile_id)
-                return TileProcessResult(
+                p_res = TileProcessResult(
                     tile_id=vt.tile_id,
                     touch_only=True,
-                    checked_at=ctx.timestamp,
-                    attempts=result.attempts,
                     downloaded=False,
+                    checked_at=ctx.timestamp,
                 )
+                m_res = TileMetrics(
+                    tile_id=vt.tile_id,
+                    elapsed_ms=elapsed_ms,
+                    retries=result.retry_count,
+                    bytes_downloaded=0,
+                    downloaded=False,
+                    updated=False,
+                    not_modified=True,
+                    unchanged=False,
+                    failed=False,
+                )
+                return p_res, m_res
 
             new_hash = self.hasher.hash(result.data)
+            bytes_len = len(result.data)
 
             if self._should_update(old_state, result, new_hash):
                 path = self.resolver.resolve(vt.tile_id, vt.map_info)
                 self._write_tile(path, result.data)
                 new_state = self._build_state(vt, new_hash, path, result, ctx.timestamp)
-                _log.debug("Updated tile %s (%d bytes)", vt.tile_id, len(result.data))
-                return TileProcessResult(
+                _log.debug("Updated tile %s (%d bytes)", vt.tile_id, bytes_len)
+                p_res = TileProcessResult(
                     tile_id=vt.tile_id,
                     state=new_state,
                     updated=True,
-                    checked_at=ctx.timestamp,
-                    attempts=result.attempts,
                     downloaded=True,
+                    checked_at=ctx.timestamp,
                 )
+                m_res = TileMetrics(
+                    tile_id=vt.tile_id,
+                    elapsed_ms=elapsed_ms,
+                    retries=result.retry_count,
+                    bytes_downloaded=bytes_len,
+                    downloaded=True,
+                    updated=True,
+                    not_modified=False,
+                    unchanged=False,
+                    failed=False,
+                )
+                return p_res, m_res
             else:
                 _log.debug("Tile %s unchanged (hash match); will touch last_checked", vt.tile_id)
-                return TileProcessResult(
+                p_res = TileProcessResult(
                     tile_id=vt.tile_id,
                     touch_only=True,
-                    checked_at=ctx.timestamp,
-                    attempts=result.attempts,
                     downloaded=True,
+                    checked_at=ctx.timestamp,
                 )
+                m_res = TileMetrics(
+                    tile_id=vt.tile_id,
+                    elapsed_ms=elapsed_ms,
+                    retries=result.retry_count,
+                    bytes_downloaded=bytes_len,
+                    downloaded=True,
+                    updated=False,
+                    not_modified=False,
+                    unchanged=True,
+                    failed=False,
+                )
+                return p_res, m_res
 
         except TileError as exc:
+            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
             _log.error("Tile %s failed: %s", vt.tile_id, exc)
-            return TileProcessResult(
+            p_res = TileProcessResult(
                 tile_id=vt.tile_id,
                 checked_at=ctx.timestamp,
                 error=exc,
             )
+            m_res = TileMetrics(
+                tile_id=vt.tile_id,
+                elapsed_ms=elapsed_ms,
+                retries=0,
+                bytes_downloaded=0,
+                downloaded=False,
+                updated=False,
+                not_modified=False,
+                unchanged=False,
+                failed=True,
+            )
+            return p_res, m_res
 
     def _download(self, vt: VisibleTile, old_state: TileState | None = None) -> DownloadResult:
         """Download the tile using the downloader, passing conditional headers if old_state exists."""

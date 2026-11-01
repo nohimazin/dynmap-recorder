@@ -121,7 +121,7 @@ def test_process_tile_new_or_changed(dummy_ctx, tile_id, map_info):
     )
 
     vt = VisibleTile(tile_id=tile_id, map_info=map_info, priority=1.0)
-    process_result = synchronizer._process_tile(vt, dummy_ctx)
+    process_result, tile_metrics = synchronizer._process_tile(vt, dummy_ctx)
 
     # HTTP, hasher, writer all called
     downloader.download.assert_called_once_with(tile_id, map_info, etag=None, last_modified=None)
@@ -148,6 +148,15 @@ def test_process_tile_new_or_changed(dummy_ctx, tile_id, map_info):
     assert process_result.state.etag == '"etag_123"'
     assert process_result.state.size == 8
     assert process_result.state.last_modified == "Mon, 01 Jan 2026 00:00:00 GMT"
+
+    # Metrics fields
+    assert tile_metrics.updated is True
+    assert tile_metrics.downloaded is True
+    assert tile_metrics.not_modified is False
+    assert tile_metrics.unchanged is False
+    assert tile_metrics.bytes_downloaded == 8
+    assert tile_metrics.retries == 0
+    assert tile_metrics.failed is False
 
 
 def test_process_tile_unchanged(dummy_ctx, tile_id, map_info):
@@ -185,7 +194,7 @@ def test_process_tile_unchanged(dummy_ctx, tile_id, map_info):
     )
 
     vt = VisibleTile(tile_id=tile_id, map_info=map_info, priority=1.0)
-    process_result = synchronizer._process_tile(vt, dummy_ctx)
+    process_result, tile_metrics = synchronizer._process_tile(vt, dummy_ctx)
 
     downloader.download.assert_called_once_with(tile_id, map_info, etag='"etag_123"', last_modified="Mon, 01 Jan 2026 00:00:00 GMT")
     hasher.hash.assert_called_once_with(b"png_data")
@@ -205,6 +214,13 @@ def test_process_tile_unchanged(dummy_ctx, tile_id, map_info):
     assert process_result.state is None
     assert process_result.tile_id == tile_id
     assert process_result.checked_at == dummy_ctx.timestamp
+
+    # Metrics fields
+    assert tile_metrics.updated is False
+    assert tile_metrics.downloaded is True
+    assert tile_metrics.not_modified is False
+    assert tile_metrics.unchanged is True
+    assert tile_metrics.failed is False
 
 
 def test_process_tile_304_not_modified(dummy_ctx, tile_id, map_info):
@@ -240,7 +256,7 @@ def test_process_tile_304_not_modified(dummy_ctx, tile_id, map_info):
     )
 
     vt = VisibleTile(tile_id=tile_id, map_info=map_info, priority=1.0)
-    process_result = synchronizer._process_tile(vt, dummy_ctx)
+    process_result, tile_metrics = synchronizer._process_tile(vt, dummy_ctx)
 
     downloader.download.assert_called_once_with(tile_id, map_info, etag='"etag_123"', last_modified="Mon, 01 Jan 2026 00:00:00 GMT")
     # Hasher, writer, and DB must not be called from _process_tile
@@ -258,6 +274,13 @@ def test_process_tile_304_not_modified(dummy_ctx, tile_id, map_info):
     assert process_result.state is None
     assert process_result.tile_id == tile_id
     assert process_result.checked_at == dummy_ctx.timestamp
+
+    # Metrics fields
+    assert tile_metrics.updated is False
+    assert tile_metrics.downloaded is False
+    assert tile_metrics.not_modified is True
+    assert tile_metrics.unchanged is False
+    assert tile_metrics.failed is False
 
 
 def test_on_tick_with_multiple_tiles_and_error_handling(dummy_ctx, tile_id, map_info):

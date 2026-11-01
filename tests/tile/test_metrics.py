@@ -1,4 +1,4 @@
-from dynmap_recorder.synchronizers.tile.metrics import TickMetrics
+from dynmap_recorder.synchronizers.tile.metrics import MetricsAggregator, TickMetrics, TileMetrics
 from dynmap_recorder.context import TickContext
 from dynmap_recorder.synchronizers.tile.database import TileDatabase
 from dynmap_recorder.synchronizers.tile.downloader import DownloadResult
@@ -100,3 +100,101 @@ def test_sync_pipeline_writes_tile_and_persists_state(tmp_path):
     assert tile_path.read_bytes() == b"tile-bytes"
     assert state.etag == '"v1"'
     synchronizer.on_stop()
+
+
+def test_metrics_aggregator_records_and_summarizes():
+    aggregator = MetricsAggregator()
+    aggregator.record(TileMetrics(
+        tile_id=TileID(1, 0, 0, 0),
+        elapsed_ms=10.0,
+        retries=2,
+        bytes_downloaded=1024,
+        downloaded=True,
+        updated=True,
+    ))
+    aggregator.record(TileMetrics(
+        tile_id=TileID(1, 0, 1, 0),
+        elapsed_ms=5.0,
+        retries=0,
+        bytes_downloaded=0,
+        not_modified=True,
+    ))
+    aggregator.record(TileMetrics(
+        tile_id=TileID(1, 0, 2, 0),
+        elapsed_ms=8.0,
+        retries=1,
+        bytes_downloaded=2048,
+        downloaded=True,
+        unchanged=True,
+    ))
+    aggregator.record(TileMetrics(
+        tile_id=TileID(1, 0, 3, 0),
+        elapsed_ms=15.0,
+        retries=0,
+        bytes_downloaded=0,
+        failed=True,
+    ))
+
+    summary = aggregator.summary(
+        scanned_tiles=4,
+        retry_tiles=1,
+        retried=1,
+        dropped=0,
+        elapsed_ms=100.0,
+    )
+
+    assert summary.scanned_tiles == 4
+    assert summary.retry_tiles == 1
+    assert summary.downloaded == 2
+    assert summary.updated == 1
+    assert summary.not_modified == 1
+    assert summary.unchanged == 1
+    assert summary.touched == 2  # not_modified + unchanged
+    assert summary.failed == 1
+    assert summary.http_retries == 3
+    assert summary.bytes_downloaded == 3072
+    assert summary.retried == 1
+    assert summary.dropped == 0
+    assert summary.elapsed_ms == 100.0
+
+
+def test_metrics_aggregator_reset():
+    aggregator = MetricsAggregator()
+    aggregator.record(TileMetrics(tile_id=TileID(1, 0, 0, 0), updated=True))
+    assert len(aggregator._tile_metrics) == 1
+    aggregator.reset()
+    assert len(aggregator._tile_metrics) == 0
+
+
+def test_metrics_aggregator_format_log():
+    metrics = TickMetrics(
+        scanned_tiles=128,
+        retry_tiles=3,
+        downloaded=54,
+        updated=43,
+        not_modified=72,
+        unchanged=11,
+        touched=83,
+        failed=2,
+        retried=2,
+        dropped=0,
+        elapsed_ms=1320.0,
+        bytes_downloaded=1258291,  # ~1.2 MB
+        http_retries=5,
+    )
+    log_text = MetricsAggregator.format_log(metrics, tick_number=42)
+
+    assert "Tick #42" in log_text
+    assert "Updated: 43" in log_text
+    assert "HTTP 304: 72" in log_text
+    assert "Unchanged (200): 11" in log_text
+    assert "Failed: 2" in log_text
+    assert "Scanned: 128" in log_text
+    assert "Downloaded: 54" in log_text
+    assert "1.2 MB" in log_text
+    assert "HTTP retries: 5" in log_text
+    assert "Queue retries: 3" in log_text
+    assert "Queued: 2" in log_text
+    assert "Dropped: 0" in log_text
+    assert "1.32 sec" in log_text
+

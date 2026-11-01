@@ -3,6 +3,8 @@
 Consolidated data structures for the tile synchronizer.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -113,21 +115,39 @@ class VisibleTile:
     map_info: MapInfo
     priority: int = 0
 
+
+# ----------------------------------------------------------------------
+# TileProcessResult – outcome of processing one tile in the pipeline
+# ----------------------------------------------------------------------
 @dataclass
 class TileProcessResult:
     """Result returned by ``TileSynchronizer._process_tile()``.
 
     Separates the HTTP/hash/write work (done in a worker thread) from the DB
     write (done in the main thread inside a single ``transaction()``).
+
+    Attributes
+    ----------
+    tile_id:
+        Identifier of the processed tile.
+    state:
+        New :class:`TileState` to ``save()`` into the DB. ``None`` when unchanged or failed.
+    updated:
+        ``True`` when new tile content was downloaded and saved.
+    touch_only:
+        ``True`` when tile was unchanged (304 or hash match) and only ``last_checked`` requires update.
+    checked_at:
+        Epoch milliseconds taken from ``TickContext.timestamp``.
+    error:
+        Exception caught during processing if failed, else ``None``.
     """
 
     tile_id: TileID
     state: Optional[TileState] = None
     updated: bool = False
     touch_only: bool = False
-    checked_at: int = 0
-    attempts: int = 1
     downloaded: bool = False
+    checked_at: int = 0
     error: Optional[Exception] = field(default=None, compare=False)
 
     @property
@@ -137,7 +157,7 @@ class TileProcessResult:
 
 
 from .downloader import RetryPolicy
-from .metrics import MetricsCollector, TickMetricsSummary, TileMetrics
+
 
 __all__ = [
     "TileID",
@@ -147,7 +167,4 @@ __all__ = [
     "TileProcessResult",
     "VisibleTile",
     "RetryPolicy",
-    "TileMetrics",
-    "TickMetricsSummary",
-    "MetricsCollector",
 ]

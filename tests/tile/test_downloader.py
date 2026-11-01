@@ -189,6 +189,7 @@ class TestRetryPolicy:
             res = downloader.download(tile_id, map_info)
 
         assert res.status == 200
+        assert res.retry_count == 1
         assert mock_urlopen.call_count == 2
         mock_sleep.assert_called_once_with(0.01)
 

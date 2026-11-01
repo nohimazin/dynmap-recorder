@@ -19,7 +19,7 @@ from .path_resolver import TilePathResolver
 from .scanner import VisibleTileScanner
 from .settings import TileSynchronizerSettings
 from .synchronizer import TileSynchronizer
-from .metrics import TickMetrics
+from .metrics import MetricsAggregator, TickMetrics, TileMetrics
 from .writer import TileWriter
 
 __all__ = [
@@ -44,6 +44,8 @@ __all__ = [
     # Orchestration
     "TileSynchronizer",
     "TickMetrics",
+    "TileMetrics",
+    "MetricsAggregator",
     # Exceptions
     "TileError",
     "TileDownloadError",
